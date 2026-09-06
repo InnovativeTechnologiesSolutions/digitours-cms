@@ -2,11 +2,10 @@
 
 import React, { useState } from 'react';
 import { GoogleGenAI, Type, Schema } from '@google/genai';
+import { supabase } from '@/lib/supabase';
 
-// Initialize Gemini API client
 const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY || '' });
 
-// Define JSON schema for structured tour package output
 const tourPackageSchema: Schema = {
   type: Type.OBJECT,
   properties: {
@@ -48,8 +47,10 @@ export default function AITourGeneratorPage() {
   const [islandName, setIslandName] = useState('');
   const [stopCount, setStopCount] = useState('5');
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [generatedTour, setGeneratedTour] = useState<any>(null);
   const [error, setError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,11 +58,12 @@ export default function AITourGeneratorPage() {
 
     setLoading(true);
     setError('');
+    setSuccessMsg('');
 
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: `Create a ${stopCount}-stop digital walking/driving tour package for the island/location: "${islandName}".`,
+        contents: `Create a ${stopCount}-stop digital walking/driving tour package for the location: "${islandName}".`,
         config: {
           systemInstruction: `You are an expert travel writer and digital tour guide creator. Output complete tour packages strictly adhering to the JSON schema.
 Rules:
@@ -75,14 +77,80 @@ Rules:
       });
 
       if (response.text) {
-        const parsedData = JSON.parse(response.text);
-        setGeneratedTour(parsedData);
+        setGeneratedTour(JSON.parse(response.text));
       }
     } catch (err: any) {
       console.error(err);
-      setError(err.message || 'Failed to generate tour. Please check your API key.');
+      setError(err.message || 'Failed to generate tour package.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSaveToSupabase = async () => {
+    if (!generatedTour) return;
+    setSaving(true);
+    setError('');
+    setSuccessMsg('');
+
+    try {
+      // 1. Get or create Destination
+      let { data: destinationData } = await supabase
+        .from('destinations')
+        .select('id')
+        .eq('name', generatedTour.destination)
+        .single();
+
+      if (!destinationData) {
+        const { data: newDest, error: destError } = await supabase
+          .from('destinations')
+          .insert({ name: generatedTour.destination, type: 'Island' })
+          .select()
+          .single();
+        if (destError) throw destError;
+        destinationData = newDest;
+      }
+
+      // 2. Insert Tour
+      const { data: tourData, error: tourError } = await supabase
+        .from('tours')
+        .insert({
+          destination_id: destinationData.id,
+          title: generatedTour.tour_title,
+          description: `AI-generated tour featuring ${generatedTour.stops.length} stops in ${generatedTour.destination}.`,
+          is_free: generatedTour.is_free || false,
+          price: 0.00
+        })
+        .select()
+        .single();
+
+      if (tourError) throw tourError;
+
+      // 3. Insert Tour Stops
+      const stopsToInsert = generatedTour.stops.map((stop: any) => ({
+        tour_id: tourData.id,
+        stop_number: stop.stop_number,
+        stop_name: stop.stop_name,
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+        approx_duration_minutes: stop.approx_duration_minutes || 15,
+        navigation_instructions: stop.navigation_instructions_from_previous,
+        text_content: stop.text_content,
+        audio_script: stop.audio_script
+      }));
+
+      const { error: stopsError } = await supabase
+        .from('tour_stops')
+        .insert(stopsToInsert);
+
+      if (stopsError) throw stopsError;
+
+      setSuccessMsg(`Successfully saved "${generatedTour.tour_title}" and ${generatedTour.stops.length} stops to Supabase!`);
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || 'Failed to save tour to Supabase.');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -90,7 +158,6 @@ Rules:
     <div className="min-h-screen bg-slate-950 text-slate-100 p-8 font-sans">
       <div className="max-w-5xl mx-auto space-y-8">
         
-        {/* Header */}
         <header className="border-b border-slate-800 pb-4">
           <h1 className="text-3xl font-bold text-emerald-400">AI Tour Generator</h1>
           <p className="text-slate-400 text-sm mt-1">
@@ -98,7 +165,6 @@ Rules:
           </p>
         </header>
 
-        {/* Input Form */}
         <form onSubmit={handleGenerate} className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6 shadow-xl">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             
@@ -139,24 +205,13 @@ Rules:
             disabled={loading}
             className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-800 text-slate-950 font-bold py-3.5 px-6 rounded-lg transition-all shadow-lg flex items-center justify-center space-x-2"
           >
-            {loading ? (
-              <span className="flex items-center space-x-2">
-                <span className="animate-spin h-5 w-5 border-2 border-slate-950 border-t-transparent rounded-full" />
-                <span>Generating Tour Package...</span>
-              </span>
-            ) : (
-              <span>Generate Tour with Gemini</span>
-            )}
+            {loading ? <span>Generating Tour Package...</span> : <span>Generate Tour with Gemini</span>}
           </button>
         </form>
 
-        {error && (
-          <div className="bg-red-950/50 border border-red-800 text-red-300 p-4 rounded-xl text-sm">
-            {error}
-          </div>
-        )}
+        {error && <div className="bg-red-950/50 border border-red-800 text-red-300 p-4 rounded-xl text-sm">{error}</div>}
+        {successMsg && <div className="bg-emerald-950/50 border border-emerald-800 text-emerald-300 p-4 rounded-xl text-sm">{successMsg}</div>}
 
-        {/* Output Preview & Editable Fields */}
         {generatedTour && (
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6 shadow-2xl">
             <div className="flex justify-between items-center border-b border-slate-800 pb-4">
@@ -167,17 +222,16 @@ Rules:
                 <h2 className="text-2xl font-bold mt-2">{generatedTour.tour_title}</h2>
               </div>
               <button
-                onClick={() => alert('Tour ready for database commit!')}
-                className="bg-slate-100 hover:bg-white text-slate-950 px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors"
+                onClick={handleSaveToSupabase}
+                disabled={saving}
+                className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 px-5 py-2.5 rounded-lg text-sm font-bold transition-colors disabled:bg-slate-800"
               >
-                Save Tour to Supabase
+                {saving ? 'Saving...' : 'Save Tour to Supabase'}
               </button>
             </div>
 
-            {/* Stops Display */}
             <div className="space-y-4">
               <h3 className="text-lg font-semibold text-slate-300">Generated Stops ({generatedTour.stops.length})</h3>
-              
               {generatedTour.stops.map((stop: any, index: number) => (
                 <div key={index} className="bg-slate-950 border border-slate-800/80 rounded-lg p-5 space-y-3">
                   <div className="flex justify-between items-center">
@@ -187,16 +241,19 @@ Rules:
                   <input
                     type="text"
                     defaultValue={stop.stop_name}
+                    onChange={(e) => (stop.stop_name = e.target.value)}
                     className="w-full bg-slate-900 border border-slate-800 rounded px-3 py-1.5 text-slate-100 font-semibold"
                   />
                   <textarea
                     defaultValue={stop.navigation_instructions_from_previous}
+                    onChange={(e) => (stop.navigation_instructions_from_previous = e.target.value)}
                     rows={2}
                     className="w-full bg-slate-900 border border-slate-800 rounded px-3 py-1.5 text-xs text-slate-300"
                     placeholder="Directions..."
                   />
                   <textarea
                     defaultValue={stop.text_content}
+                    onChange={(e) => (stop.text_content = e.target.value)}
                     rows={3}
                     className="w-full bg-slate-900 border border-slate-800 rounded px-3 py-1.5 text-xs text-slate-300"
                     placeholder="Tour Narrative..."
